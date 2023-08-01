@@ -7,6 +7,13 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+class Benchmark:
+    def __init__(self):
+        ...
+
+    def get_optimal_action(self, *args, **kwargs):
+        return random.choice(list(Action))
+
 
 class Easy21StateValueApproximation(nn.Module):
     VALID_PLAYER_SUMS = list(range(22))
