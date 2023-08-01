@@ -19,7 +19,7 @@ class Evaluator:
                 )
                 game.step(action)
             score += game.history[-1].reward_t_1
-        return score / self.num_episodes
+        return score / num_episodes
 
 
 class MonteCarloSimulator:
@@ -124,10 +124,7 @@ class ApproximationSimulator:
     def run(self, num_episodes):
         for _ in tqdm(range(num_episodes)):
             game = self.game_class()
-            eligibility = {
-                name: torch.zeros_like(param)
-                for name, param in self.model.named_parameters()
-            }
+            eligibility = self.init_eligibility()
             action = self.model.get_epsilon_greedy_action(
                 game.state.player_sum, game.state.dealer_sum
             )
@@ -140,12 +137,11 @@ class ApproximationSimulator:
                     state_update.action_t.value,
                     torch.tensor(state_update.reward_t_1),
                 )
-
+                previous_value = self.model(
+                    prev_player_sum, prev_dealer_sum, prev_action
+                )
                 if game.state.terminal:
                     expected_value = torch.tensor(0, requires_grad=False)
-                    previous_value = self.model(
-                        prev_player_sum, prev_dealer_sum, prev_action
-                    )
                     sarsa_error = reward + expected_value - previous_value
                     eligibility = self.update(
                         sarsa_error,
@@ -161,9 +157,6 @@ class ApproximationSimulator:
                         expected_value = self.model(
                             game.state.player_sum, game.state.dealer_sum, action.value
                         )
-                    previous_value = self.model(
-                        prev_player_sum, prev_dealer_sum, prev_action
-                    )
                     sarsa_error = reward + expected_value - previous_value
                     eligibility = self.update(
                         sarsa_error,
@@ -189,6 +182,12 @@ class ApproximationSimulator:
                 param.grad.zero_()
 
         return eligibility
+
+    def init_eligibility(self):
+        return {
+            name: torch.zeros_like(param)
+            for name, param in self.model.named_parameters()
+        }
 
 
 class REINFORCESimulator:
@@ -220,14 +219,106 @@ class REINFORCESimulator:
             loss += -log_prob * torch.tensor(reward).float()
         loss.backward()
         with torch.no_grad():
-            for param in self.model.parameters():
+            for name, param in self.model.named_parameters():
                 param.data -= self.learning_rate * param.grad
                 param.grad.zero_()
 
 
 class ActorCriticSimulator:
-    def __init__(self, actor_model, critic_model, learning_rate, game_class=Easy21):
+    def __init__(
+        self,
+        actor_model,
+        critic_model,
+        lambda_,
+        actor_learning_rate,
+        critic_learning_rate,
+        game_class=Easy21,
+    ):
         self.actor_model = actor_model
         self.critic_model = critic_model
         self.game_class = game_class
-        self.learning_rate = learning_rate
+        self.lambda_ = lambda_
+        self.actor_learning_rate = actor_learning_rate
+        self.critic_learning_rate = critic_learning_rate
+
+    def run(self, num_episodes):
+        for _ in tqdm(range(num_episodes)):
+            game = self.game_class()
+            eligibility = self.init_eligibility()
+            action = self.actor_model.get_epsilon_greedy_action(
+                game.state.player_sum, game.state.dealer_sum
+            )
+
+            while True:
+                state_update = game.step(action)
+                prev_player_sum, prev_dealer_sum, prev_action, reward = (
+                    state_update.state_t.player_sum,
+                    state_update.state_t.dealer_sum,
+                    state_update.action_t.value,
+                    torch.tensor(state_update.reward_t_1),
+                )
+                with torch.no_grad():
+                    previous_value = self.critic_model(
+                        prev_player_sum, prev_dealer_sum, prev_action
+                    )
+                self.update_actor(
+                    prev_player_sum, prev_dealer_sum, prev_action, previous_value
+                )
+                previous_value = self.critic_model(
+                    prev_player_sum, prev_dealer_sum, prev_action
+                )
+                if game.state.terminal:
+                    expected_value = torch.tensor(0, requires_grad=False)
+
+                    sarsa_error = reward + expected_value - previous_value
+                    eligibility = self.update_critic(sarsa_error, eligibility)
+                    break
+
+                else:
+                    action = self.actor_model.get_epsilon_greedy_action(
+                        game.state.player_sum, game.state.dealer_sum
+                    )
+                    with torch.no_grad():
+                        expected_value = self.critic_model(
+                            game.state.player_sum, game.state.dealer_sum, action.value
+                        )
+                    sarsa_error = reward + expected_value - previous_value
+                    eligibility = self.update_critic(sarsa_error, eligibility)
+
+    def update_actor(self, player_sum, dealer_sum, action, reward):
+        # REINFORCE loss
+        log_prob = torch.log(self.actor_model(player_sum, dealer_sum)[action])
+        loss = -log_prob * reward
+        # Backward pass to compute gradients
+        loss.backward()
+        with torch.no_grad():
+            for name, param in self.actor_model.named_parameters():
+                param.data -= self.actor_learning_rate * param.grad
+                # Reset gradients
+                param.grad.zero_()
+
+        return
+
+    def update_critic(self, sarsa_error, eligibility):
+        # MSE loss
+        loss = (sarsa_error**2).mean()
+        # Backward pass to compute gradients
+        loss.backward()
+
+        with torch.no_grad():
+            for name, param in self.critic_model.named_parameters():
+                eligibility[name] *= self.lambda_
+                eligibility[name] += param.grad
+
+                param.data -= self.critic_learning_rate * eligibility[name]
+
+                # Reset gradients
+                param.grad.zero_()
+
+        return eligibility
+
+    def init_eligibility(self):
+        return {
+            name: torch.zeros_like(param)
+            for name, param in self.critic_model.named_parameters()
+        }

@@ -8,6 +8,75 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
+class Easy21StateValueApproximation(nn.Module):
+    VALID_PLAYER_SUMS = list(range(22))
+    VALID_DEALER_SUMS = list(range(11))
+    ACTIONS = list(Action)
+    PLAYER_BINS = [(1, 6), (4, 9), (7, 12), (10, 15), (13, 18), (16, 22)]
+    DEALER_BINS = [(1, 4), (4, 7), (7, 11)]
+
+    def __init__(self):
+        super().__init__()
+        self.feature_size = len(self.PLAYER_BINS) * len(self.DEALER_BINS)
+        self.fc1 = nn.Linear(self.feature_size, 1, bias=False)
+
+    def forward(self, player_sum, dealer_sum):
+        x = self.get_feature(player_sum, dealer_sum)
+        x = self.fc1(x)
+        return torch.tanh(x)
+
+    def get_feature(self, player_sum, dealer_sum):
+        for i, d_bin in enumerate(self.DEALER_BINS):
+            if d_bin[0] <= dealer_sum < d_bin[1]:
+                dealer_feature = i
+
+        for i, p_bin in enumerate(self.PLAYER_BINS):
+            if p_bin[0] <= player_sum < p_bin[1]:
+                player_feature = i
+
+        feature_vector = torch.zeros(len(self.PLAYER_BINS), len(self.DEALER_BINS))
+        feature_vector[player_feature, dealer_feature] = 1.0
+        return feature_vector.flatten()
+
+    def get_value_function(self):
+        output_array = np.zeros(
+            (
+                len(self.VALID_PLAYER_SUMS) - 1,
+                len(self.VALID_DEALER_SUMS) - 1,
+            )
+        )
+        # Perform the forward pass for all combinations
+        with torch.no_grad():  # Ensure no gradient computation is made
+            for player in range(1, len(self.VALID_PLAYER_SUMS)):
+                for dealer in range(1, len(self.VALID_DEALER_SUMS)):
+                    output = self.forward(player, dealer)
+                    output_array[
+                        player - 1, dealer - 1
+                    ] = output.detach().numpy()  # Convert tensor to value and store
+        return output_array
+
+    def plot_value_function(self):
+        fig = plt.figure(figsize=(10, 10))
+        ax = fig.add_subplot(111, projection="3d")
+        state_value = self.get_value_function()
+        # Generate coordinate matrices, starting from index 1
+        X, Y = np.meshgrid(
+            range(1, state_value.shape[1] + 1), range(1, state_value.shape[0] + 1)
+        )
+
+        # Plot the surface, starting from index 1
+        ax.plot_surface(X, Y, state_value, cmap="viridis")
+
+        # Setting labels
+        ax.set_xlabel("Dealer Sum")
+        ax.set_ylabel("Player Sum")
+        ax.set_zlabel("Value")
+        ax.set_title("Value Function")
+
+        # Displaying the plot
+        plt.show()
+
+
 class Easy21PolicyApproximation(nn.Module):
     VALID_PLAYER_SUMS = list(range(22))
     VALID_DEALER_SUMS = list(range(11))
@@ -63,7 +132,7 @@ class Easy21PolicyApproximation(nn.Module):
         return optimal_action
 
 
-class Easy21ValueApproximation(nn.Module):
+class Easy21ActionValueApproximation(nn.Module):
     VALID_PLAYER_SUMS = list(range(22))
     VALID_DEALER_SUMS = list(range(11))
     ACTIONS = list(Action)
