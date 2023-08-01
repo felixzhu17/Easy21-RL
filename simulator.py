@@ -3,14 +3,32 @@ from tqdm import tqdm
 import numpy as np
 import torch
 
-class MonteCarloSimulator:
-    def __init__(self, num_episodes, policy, game_class=Easy21):
-        self.num_episodes = num_episodes
+
+class Evaluator:
+    def __init__(self, policy, game_class=Easy21):
         self.policy = policy
         self.game_class = game_class
 
-    def run(self):
-        for _ in tqdm(range(self.num_episodes)):
+    def evaluate(self, num_episodes):
+        score = 0
+        for _ in tqdm(range(num_episodes)):
+            game = self.game_class()
+            while game.state.terminal is not True:
+                action = self.policy.get_optimal_action(
+                    game.state.player_sum, game.state.dealer_sum
+                )
+                game.step(action)
+            score += game.history[-1].reward_t_1
+        return score / self.num_episodes
+
+
+class MonteCarloSimulator:
+    def __init__(self, policy, game_class=Easy21):
+        self.policy = policy
+        self.game_class = game_class
+
+    def run(self, num_episodes):
+        for _ in tqdm(range(num_episodes)):
             game = self.game_class()
             while game.state.terminal is not True:
                 action = self.policy.get_epsilon_greedy_action(
@@ -35,14 +53,13 @@ class MonteCarloSimulator:
 
 
 class SARSALambdaSimulator:
-    def __init__(self, num_episodes, policy, lambda_, game_class=Easy21):
-        self.num_episodes = num_episodes
+    def __init__(self, policy, lambda_, game_class=Easy21):
         self.policy = policy
         self.lambda_ = lambda_
         self.game_class = game_class
 
-    def run(self):
-        for _ in tqdm(range(self.num_episodes)):
+    def run(self, num_episodes):
+        for _ in tqdm(range(num_episodes)):
             game = self.game_class()
             eligibility = np.zeros_like(self.policy.action_state_value)
             action = self.policy.get_epsilon_greedy_action(
@@ -89,26 +106,28 @@ class SARSALambdaSimulator:
                     previous_value = expected_value
 
     def update(self, player_sum, dealer_sum, action, sarsa_error, eligibility):
-        eligibility *= self.lambda_ 
+        eligibility *= self.lambda_
         eligibility[player_sum, dealer_sum, action] += 1
         alpha = self.policy.get_update_alpha(player_sum, dealer_sum, action)
         self.policy.action_state_value += alpha * sarsa_error * eligibility
         self.policy.action_state_counts[player_sum, dealer_sum, action] += 1
         return eligibility
 
+
 class ApproximationSimulator:
-    def __init__(self, num_episodes, model, lambda_, learning_rate, game_class=Easy21):
-        self.num_episodes = num_episodes
+    def __init__(self, model, lambda_, learning_rate, game_class=Easy21):
         self.model = model
         self.game_class = game_class
         self.lambda_ = lambda_
         self.learning_rate = learning_rate
 
-    def run(self):
-        for _ in tqdm(range(self.num_episodes)):
+    def run(self, num_episodes):
+        for _ in tqdm(range(num_episodes)):
             game = self.game_class()
-            eligibility = {name: torch.zeros_like(param) 
-                           for name, param in self.model.named_parameters()}
+            eligibility = {
+                name: torch.zeros_like(param)
+                for name, param in self.model.named_parameters()
+            }
             action = self.model.get_epsilon_greedy_action(
                 game.state.player_sum, game.state.dealer_sum
             )
@@ -121,10 +140,12 @@ class ApproximationSimulator:
                     state_update.action_t.value,
                     torch.tensor(state_update.reward_t_1),
                 )
-        
+
                 if game.state.terminal:
-                    expected_value = torch.tensor(0, requires_grad = False)
-                    previous_value = self.model(prev_player_sum, prev_dealer_sum, prev_action)
+                    expected_value = torch.tensor(0, requires_grad=False)
+                    previous_value = self.model(
+                        prev_player_sum, prev_dealer_sum, prev_action
+                    )
                     sarsa_error = reward + expected_value - previous_value
                     eligibility = self.update(
                         sarsa_error,
@@ -140,7 +161,9 @@ class ApproximationSimulator:
                         expected_value = self.model(
                             game.state.player_sum, game.state.dealer_sum, action.value
                         )
-                    previous_value = self.model(prev_player_sum, prev_dealer_sum, prev_action)
+                    previous_value = self.model(
+                        prev_player_sum, prev_dealer_sum, prev_action
+                    )
                     sarsa_error = reward + expected_value - previous_value
                     eligibility = self.update(
                         sarsa_error,
@@ -148,18 +171,17 @@ class ApproximationSimulator:
                     )
 
     def update(self, sarsa_error, eligibility):
-
         # MSE loss
-        loss = (sarsa_error ** 2).mean()
+        loss = (sarsa_error**2).mean()
         # Backward pass to compute gradients
         loss.backward()
-        
+
         with torch.no_grad():
             for name, param in self.model.named_parameters():
                 # Discount and accumulate gradients in eligibility trace
                 eligibility[name] *= self.lambda_
                 eligibility[name] += param.grad
-                
+
                 # Update weights with eligibility trace
                 param.data -= self.learning_rate * eligibility[name]
 
@@ -167,3 +189,45 @@ class ApproximationSimulator:
                 param.grad.zero_()
 
         return eligibility
+
+
+class REINFORCESimulator:
+    def __init__(self, model, learning_rate, game_class=Easy21):
+        self.model = model
+        self.game_class = game_class
+        self.learning_rate = learning_rate
+
+    def run(self, num_episodes):
+        for _ in tqdm(range(num_episodes)):
+            game = self.game_class()
+            while game.state.terminal is not True:
+                action = self.model.get_epsilon_greedy_action(
+                    game.state.player_sum, game.state.dealer_sum
+                )
+                game.step(action)
+            self.update(game.get_history())
+
+    def update(self, history):
+        loss = torch.tensor(0).float()
+        for _, row in history.iterrows():
+            player_sum, dealer_sum, action, reward = (
+                row["player_sum_t"],
+                row["dealer_sum_t"],
+                row["action_t"],
+                row["cumulative_reward"],
+            )
+            log_prob = torch.log(self.model(player_sum, dealer_sum)[action])
+            loss += -log_prob * torch.tensor(reward).float()
+        loss.backward()
+        with torch.no_grad():
+            for param in self.model.parameters():
+                param.data -= self.learning_rate * param.grad
+                param.grad.zero_()
+
+
+class ActorCriticSimulator:
+    def __init__(self, actor_model, critic_model, learning_rate, game_class=Easy21):
+        self.actor_model = actor_model
+        self.critic_model = critic_model
+        self.game_class = game_class
+        self.learning_rate = learning_rate
