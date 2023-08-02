@@ -65,7 +65,7 @@ class SARSALambdaSimulator:
             action = self.policy.get_epsilon_greedy_action(
                 game.state.player_sum, game.state.dealer_sum
             )
-            previous_value = self.policy.get_action_state_value(
+            previous_expected_value = self.policy.get_action_state_value(
                 game.state.player_sum, game.state.dealer_sum, action.value
             )
 
@@ -79,7 +79,7 @@ class SARSALambdaSimulator:
                 )
                 if game.state.terminal:
                     expected_value = 0
-                    sarsa_error = reward + expected_value - previous_value
+                    sarsa_error = reward + expected_value - previous_expected_value
                     eligibility = self.update(
                         prev_player_sum,
                         prev_dealer_sum,
@@ -95,7 +95,7 @@ class SARSALambdaSimulator:
                     expected_value = self.policy.get_action_state_value(
                         game.state.player_sum, game.state.dealer_sum, action.value
                     )
-                    sarsa_error = reward + expected_value - previous_value
+                    sarsa_error = reward + expected_value - previous_expected_value
                     eligibility = self.update(
                         prev_player_sum,
                         prev_dealer_sum,
@@ -103,7 +103,7 @@ class SARSALambdaSimulator:
                         sarsa_error,
                         eligibility,
                     )
-                    previous_value = expected_value
+                    previous_expected_value = expected_value
 
     def update(self, player_sum, dealer_sum, action, sarsa_error, eligibility):
         eligibility *= self.lambda_
@@ -137,13 +137,14 @@ class ApproximationSimulator:
                     state_update.action_t.value,
                     torch.tensor(state_update.reward_t_1),
                 )
-                previous_value = self.model(
+                previous_expected_value = self.model(
                     prev_player_sum, prev_dealer_sum, prev_action
                 )
                 if game.state.terminal:
                     expected_value = torch.tensor(0, requires_grad=False)
-                    sarsa_error = reward + expected_value - previous_value
+                    sarsa_error = reward + expected_value - previous_expected_value
                     eligibility = self.update(
+                        previous_expected_value,
                         sarsa_error,
                         eligibility,
                     )
@@ -157,17 +158,17 @@ class ApproximationSimulator:
                         expected_value = self.model(
                             game.state.player_sum, game.state.dealer_sum, action.value
                         )
-                    sarsa_error = reward + expected_value - previous_value
+                    sarsa_error = reward + expected_value - previous_expected_value
                     eligibility = self.update(
+                        previous_expected_value,
                         sarsa_error,
                         eligibility,
                     )
 
-    def update(self, sarsa_error, eligibility):
-        # MSE loss
-        loss = (sarsa_error**2).mean()
-        # Backward pass to compute gradients
-        loss.backward()
+    def update(self, estimate, sarsa_error, eligibility):
+
+        # Compute gradient of the estimate
+        estimate.backward()
 
         with torch.no_grad():
             for name, param in self.model.named_parameters():
@@ -176,7 +177,7 @@ class ApproximationSimulator:
                 eligibility[name] += param.grad
 
                 # Update weights with eligibility trace
-                param.data -= self.learning_rate * eligibility[name]
+                param.data += self.learning_rate * eligibility[name] * sarsa_error
 
                 # Reset gradients
                 param.grad.zero_()
@@ -258,20 +259,25 @@ class ActorCriticSimulator:
                     torch.tensor(state_update.reward_t_1),
                 )
                 with torch.no_grad():
-                    previous_value = self.critic_model(
+                    previous_expected_value = self.critic_model(
                         prev_player_sum, prev_dealer_sum, prev_action
                     )
                 self.update_actor(
-                    prev_player_sum, prev_dealer_sum, prev_action, previous_value
+                    prev_player_sum,
+                    prev_dealer_sum,
+                    prev_action,
+                    previous_expected_value,
                 )
-                previous_value = self.critic_model(
+                previous_expected_value = self.critic_model(
                     prev_player_sum, prev_dealer_sum, prev_action
                 )
                 if game.state.terminal:
                     expected_value = torch.tensor(0, requires_grad=False)
 
-                    sarsa_error = reward + expected_value - previous_value
-                    eligibility = self.update_critic(sarsa_error, eligibility)
+                    sarsa_error = reward + expected_value - previous_expected_value
+                    eligibility = self.update_critic(
+                        previous_expected_value, sarsa_error, eligibility
+                    )
                     break
 
                 else:
@@ -282,8 +288,10 @@ class ActorCriticSimulator:
                         expected_value = self.critic_model(
                             game.state.player_sum, game.state.dealer_sum, action.value
                         )
-                    sarsa_error = reward + expected_value - previous_value
-                    eligibility = self.update_critic(sarsa_error, eligibility)
+                    sarsa_error = reward + expected_value - previous_expected_value
+                    eligibility = self.update_critic(
+                        previous_expected_value, sarsa_error, eligibility
+                    )
 
     def update_actor(self, player_sum, dealer_sum, action, reward):
         # REINFORCE loss
@@ -299,18 +307,21 @@ class ActorCriticSimulator:
 
         return
 
-    def update_critic(self, sarsa_error, eligibility):
-        # MSE loss
-        loss = (sarsa_error**2).mean()
-        # Backward pass to compute gradients
-        loss.backward()
+    def update_critic(self, estimate, sarsa_error, eligibility):
+
+        # Compute gradient of the estimate
+        estimate.backward()
 
         with torch.no_grad():
             for name, param in self.critic_model.named_parameters():
+                # Discount and accumulate gradients in eligibility trace
                 eligibility[name] *= self.lambda_
                 eligibility[name] += param.grad
 
-                param.data -= self.critic_learning_rate * eligibility[name]
+                # Update weights with eligibility trace
+                param.data += (
+                    self.critic_learning_rate * eligibility[name] * sarsa_error
+                )
 
                 # Reset gradients
                 param.grad.zero_()
@@ -358,20 +369,25 @@ class AdvantageSimulator:
                     torch.tensor(state_update.reward_t_1),
                 )
                 with torch.no_grad():
-                    previous_value = self.critic_model(
+                    previous_expected_value = self.critic_model(
                         prev_player_sum, prev_dealer_sum
                     )
                 self.update_actor(
-                    prev_player_sum, prev_dealer_sum, prev_action, previous_value
+                    prev_player_sum,
+                    prev_dealer_sum,
+                    prev_action,
+                    previous_expected_value,
                 )
-                previous_value = self.critic_model(
+                previous_expected_value = self.critic_model(
                     prev_player_sum, prev_dealer_sum
                 )
-                
+
                 if game.state.terminal:
                     expected_value = torch.tensor(0, requires_grad=False)
-                    sarsa_error = reward + expected_value - previous_value
-                    eligibility = self.update_critic(sarsa_error, eligibility)
+                    sarsa_error = reward + expected_value - previous_expected_value
+                    eligibility = self.update_critic(
+                        previous_expected_value, sarsa_error, eligibility
+                    )
                     break
 
                 else:
@@ -382,8 +398,10 @@ class AdvantageSimulator:
                         expected_value = self.critic_model(
                             game.state.player_sum, game.state.dealer_sum
                         )
-                    sarsa_error = reward + expected_value - previous_value
-                    eligibility = self.update_critic(sarsa_error, eligibility)
+                    sarsa_error = reward + expected_value - previous_expected_value
+                    eligibility = self.update_critic(
+                        previous_expected_value, sarsa_error, eligibility
+                    )
 
     def update_actor(self, player_sum, dealer_sum, action, reward):
         # REINFORCE loss
@@ -399,18 +417,21 @@ class AdvantageSimulator:
 
         return
 
-    def update_critic(self, sarsa_error, eligibility):
-        # MSE loss
-        loss = (sarsa_error**2).mean()
-        # Backward pass to compute gradients
-        loss.backward()
+    def update_critic(self, estimate, sarsa_error, eligibility):
+
+        # Compute gradient of the estimate
+        estimate.backward()
 
         with torch.no_grad():
-            for name, param in self.critic_model.named_parameters():
+            for name, param in self.model.named_parameters():
+                # Discount and accumulate gradients in eligibility trace
                 eligibility[name] *= self.lambda_
                 eligibility[name] += param.grad
 
-                param.data -= self.critic_learning_rate * eligibility[name]
+                # Update weights with eligibility trace
+                param.data += (
+                    self.critic_learning_rate * eligibility[name] * sarsa_error
+                )
 
                 # Reset gradients
                 param.grad.zero_()
