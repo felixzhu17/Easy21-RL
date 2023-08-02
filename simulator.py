@@ -423,7 +423,7 @@ class AdvantageSimulator:
         estimate.backward()
 
         with torch.no_grad():
-            for name, param in self.model.named_parameters():
+            for name, param in self.critic_model.named_parameters():
                 # Discount and accumulate gradients in eligibility trace
                 eligibility[name] *= self.lambda_
                 eligibility[name] += param.grad
