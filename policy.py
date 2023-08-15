@@ -116,13 +116,22 @@ class Easy21PolicyApproximation(nn.Module):
         feature_vector[player_feature, dealer_feature] = 1.0
         return feature_vector.flatten()
 
-    def get_epsilon_greedy_action(self, player_sum, dealer_sum, epsilon=0.05):
+    def get_epsilon_greedy_action(
+        self, player_sum, dealer_sum, epsilon=0.05, return_probability=False
+    ):
         if random.random() < epsilon:
-            return random.choice(self.ACTIONS)
+            action = random.choice(self.ACTIONS)
+            if return_probability:
+                with torch.no_grad():
+                    probabilities = self.forward(player_sum, dealer_sum)
+                action_prob = probabilities[action.value]
+                return action, action_prob
+            else:
+                return action
         else:
-            return self.get_optimal_action(player_sum, dealer_sum)
+            return self.get_optimal_action(player_sum, dealer_sum, return_probability)
 
-    def get_optimal_action(self, player_sum, dealer_sum):
+    def get_optimal_action(self, player_sum, dealer_sum, return_probability=False):
         # Use no_grad to prevent tracking of gradients during this forward pass
         with torch.no_grad():
             action_probs = self.forward(player_sum, dealer_sum)
@@ -137,7 +146,10 @@ class Easy21PolicyApproximation(nn.Module):
         ]
         # If there are multiple optimal actions, pick one uniformly at random
         optimal_action = random.choice(optimal_actions)
-        return optimal_action
+        if return_probability:
+            return optimal_action, action_probs[optimal_action.value]
+        else:
+            return optimal_action
 
 
 class Easy21ActionValueApproximation(nn.Module):

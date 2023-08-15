@@ -24,14 +24,15 @@ class GameState:
 
 
 class StateHistory:
-    def __init__(self, t, state_t, action_t, reward_t_1):
+    def __init__(self, t, state_t, action_t, reward_t_1, action_probability_t=None):
         self.t = t
         self.state_t = state_t
         self.action_t = action_t
         self.reward_t_1 = reward_t_1
+        self.action_probability_t = action_probability_t
 
     def __str__(self):
-        return f"t: {self.t}, state_t: {self.state_t}, action_t: {self.action_t}, reward_t_1: {self.reward_t_1}"
+        return f"t: {self.t}, state_t: {self.state_t}, action_t: {self.action_t}, reward_t_1: {self.reward_t_1}, action_probability_t: {self.action_probability_t}"
 
     def to_dict(self):
         return {
@@ -40,6 +41,7 @@ class StateHistory:
             "dealer_sum_t": self.state_t.dealer_sum,
             "action_t": self.action_t.value,
             "reward_t_1": self.reward_t_1,
+            "action_probability_t": self.action_probability_t,
         }
 
 
@@ -52,7 +54,7 @@ class Easy21:
         if self.verbose:
             print(self.state)
 
-    def step(self, action):
+    def step(self, action, action_probability=None):
         self.check_game_over()
         self.validate_action(action)
 
@@ -66,11 +68,19 @@ class Easy21:
                 self.state.player_sum = 0  # Busted
                 self.state.terminal = True
                 state_update = StateHistory(
-                    t=self.t, state_t=start_state, action_t=Action.HIT, reward_t_1=-1
+                    t=self.t,
+                    state_t=start_state,
+                    action_t=Action.HIT,
+                    reward_t_1=-1,
+                    action_probability_t=action_probability,
                 )
             else:
                 state_update = StateHistory(
-                    t=self.t, state_t=start_state, action_t=Action.HIT, reward_t_1=0
+                    t=self.t,
+                    state_t=start_state,
+                    action_t=Action.HIT,
+                    reward_t_1=0,
+                    action_probability_t=action_probability,
                 )
 
         else:
@@ -80,19 +90,35 @@ class Easy21:
             if self.state.dealer_sum > 21 or self.state.dealer_sum < 1:
                 self.state.dealer_sum = 0  # Busted
                 state_update = StateHistory(
-                    t=self.t, state_t=start_state, action_t=Action.STICK, reward_t_1=1
+                    t=self.t,
+                    state_t=start_state,
+                    action_t=Action.STICK,
+                    reward_t_1=1,
+                    action_probability_t=action_probability,
                 )
             if self.state.player_sum > self.state.dealer_sum:
                 state_update = StateHistory(
-                    t=self.t, state_t=start_state, action_t=Action.STICK, reward_t_1=1
+                    t=self.t,
+                    state_t=start_state,
+                    action_t=Action.STICK,
+                    reward_t_1=1,
+                    action_probability_t=action_probability,
                 )
             elif self.state.player_sum == self.state.dealer_sum:
                 state_update = StateHistory(
-                    t=self.t, state_t=start_state, action_t=Action.STICK, reward_t_1=0
+                    t=self.t,
+                    state_t=start_state,
+                    action_t=Action.STICK,
+                    reward_t_1=0,
+                    action_probability_t=action_probability,
                 )
             else:
                 state_update = StateHistory(
-                    t=self.t, state_t=start_state, action_t=Action.STICK, reward_t_1=-1
+                    t=self.t,
+                    state_t=start_state,
+                    action_t=Action.STICK,
+                    reward_t_1=-1,
+                    action_probability_t=action_probability,
                 )
 
         self.history.append(state_update)

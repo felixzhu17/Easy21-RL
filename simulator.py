@@ -273,7 +273,6 @@ class ActorCriticSimulator:
                 )
                 if game.state.terminal:
                     expected_value = torch.tensor(0, requires_grad=False)
-
                     sarsa_error = reward + expected_value - previous_expected_value
                     eligibility = self.update_critic(
                         previous_expected_value, sarsa_error, eligibility
@@ -356,11 +355,11 @@ class AdvantageSimulator:
         for _ in tqdm(range(num_episodes)):
             game = self.game_class()
             eligibility = self.init_eligibility()
-            action = self.actor_model.get_epsilon_greedy_action(
-                game.state.player_sum, game.state.dealer_sum
-            )
 
             while True:
+                action = self.actor_model.get_epsilon_greedy_action(
+                    game.state.player_sum, game.state.dealer_sum
+                )
                 state_update = game.step(action)
                 prev_player_sum, prev_dealer_sum, prev_action, reward = (
                     state_update.state_t.player_sum,
@@ -372,18 +371,19 @@ class AdvantageSimulator:
                     previous_expected_value = self.critic_model(
                         prev_player_sum, prev_dealer_sum
                     )
-                self.update_actor(
-                    prev_player_sum,
-                    prev_dealer_sum,
-                    prev_action,
-                    previous_expected_value,
-                )
-                previous_expected_value = self.critic_model(
-                    prev_player_sum, prev_dealer_sum
-                )
 
                 if game.state.terminal:
                     expected_value = torch.tensor(0, requires_grad=False)
+                    sarsa_error = reward + expected_value - previous_expected_value
+                    self.update_actor(
+                        prev_player_sum,
+                        prev_dealer_sum,
+                        prev_action,
+                        sarsa_error,
+                    )
+                    previous_expected_value = self.critic_model(
+                        prev_player_sum, prev_dealer_sum
+                    )
                     sarsa_error = reward + expected_value - previous_expected_value
                     eligibility = self.update_critic(
                         previous_expected_value, sarsa_error, eligibility
@@ -391,14 +391,20 @@ class AdvantageSimulator:
                     break
 
                 else:
-                    action = self.actor_model.get_epsilon_greedy_action(
-                        game.state.player_sum, game.state.dealer_sum
-                    )
                     with torch.no_grad():
                         expected_value = self.critic_model(
                             game.state.player_sum, game.state.dealer_sum
                         )
                     sarsa_error = reward + expected_value - previous_expected_value
+                    self.update_actor(
+                        prev_player_sum,
+                        prev_dealer_sum,
+                        prev_action,
+                        sarsa_error,
+                    )
+                    previous_expected_value = self.critic_model(
+                        prev_player_sum, prev_dealer_sum
+                    )
                     eligibility = self.update_critic(
                         previous_expected_value, sarsa_error, eligibility
                     )
@@ -437,6 +443,138 @@ class AdvantageSimulator:
                 param.grad.zero_()
 
         return eligibility
+
+    def init_eligibility(self):
+        return {
+            name: torch.zeros_like(param)
+            for name, param in self.critic_model.named_parameters()
+        }
+
+
+class PPOSimulator:
+    def __init__(
+        self,
+        actor_model,
+        critic_model,
+        lambda_,
+        actor_learning_rate,
+        critic_learning_rate,
+        epsilon,
+        actor_iterations,
+        critic_iterations,
+        game_class=Easy21,
+    ):
+        self.actor_model = actor_model
+        self.critic_model = critic_model
+        self.game_class = game_class
+        self.lambda_ = lambda_
+        self.actor_learning_rate = actor_learning_rate
+        self.critic_learning_rate = critic_learning_rate
+        self.epsilon = epsilon
+        self.actor_iterations = actor_iterations
+        self.critic_iterations = critic_iterations
+
+    def run(self, num_episodes):
+        for _ in tqdm(range(num_episodes)):
+            game = self.game_class()
+            while game.state.terminal is not True:
+                action, action_probability = self.actor_model.get_epsilon_greedy_action(
+                    game.state.player_sum,
+                    game.state.dealer_sum,
+                    return_probability=True,
+                )
+                game.step(action, action_probability)
+            game_history = game.get_history()
+
+            for _ in range(self.critic_iterations):
+                self.update_critic(game_history)
+
+            for _ in range(self.actor_iterations):
+                self.update_actor(game_history)
+
+    def update_critic(self, history):
+        eligibility = self.init_eligibility()
+        with torch.no_grad():
+            expected_values = torch.tensor(
+                [
+                    self.critic_model(player_sum, dealer_sum)
+                    for player_sum, dealer_sum in zip(
+                        history["player_sum_t"][1:], history["dealer_sum_t"][1:]
+                    )
+                ]
+            )
+            expected_values = torch.cat(
+                (expected_values, torch.tensor([0], dtype=expected_values.dtype)), dim=0
+            )  # No reward for terminal state
+            actual_reward = torch.tensor(history["reward_t_1"])
+
+        for player_sum, dealer_sum, actual_reward, expected_value in zip(
+            history["player_sum_t"],
+            history["dealer_sum_t"],
+            history["reward_t_1"],
+            expected_values,
+        ):
+            prediction = self.critic_model(player_sum, dealer_sum)
+            sarsa_error = actual_reward + expected_value - prediction
+            prediction.backward()
+            with torch.no_grad():
+                for name, param in self.critic_model.named_parameters():
+                    # Discount and accumulate gradients in eligibility trace
+                    eligibility[name] *= self.lambda_
+                    eligibility[name] += param.grad
+
+                    # Update weights with eligibility trace
+                    param.data += (
+                        self.critic_learning_rate * eligibility[name] * sarsa_error
+                    )
+                    # Reset gradients
+                    param.grad.zero_()
+
+    def update_actor(self, history):
+        with torch.no_grad():
+            predicted_rewards = torch.tensor(
+                [
+                    self.critic_model(player_sum, dealer_sum)
+                    for player_sum, dealer_sum in zip(
+                        history["player_sum_t"], history["dealer_sum_t"]
+                    )
+                ]
+            )
+            expected_value = torch.tensor(
+                [
+                    self.critic_model(player_sum, dealer_sum)
+                    for player_sum, dealer_sum in zip(
+                        history["player_sum_t"][1:], history["dealer_sum_t"][1:]
+                    )
+                ]
+            )
+            expected_value = torch.cat(
+                (expected_value, torch.tensor([0], dtype=expected_value.dtype)), dim=0
+            )  # No reward for terminal state
+            actual_reward = torch.tensor(history["reward_t_1"])
+            sarsa_errors = actual_reward + expected_value - predicted_rewards
+
+        new_action_prob = torch.stack(
+            [
+                self.actor_model(player_sum, dealer_sum)[action]
+                for player_sum, dealer_sum, action in zip(
+                    history["player_sum_t"],
+                    history["dealer_sum_t"],
+                    history["action_t"],
+                )
+            ]
+        ).squeeze(-1)
+        old_action_prob = torch.tensor(history["action_probability_t"])
+        ratio = new_action_prob / old_action_prob
+        clipped_ratio = torch.clamp(ratio, 1 - self.epsilon, 1 + self.epsilon)
+        surrogate_obj = ratio * sarsa_errors
+        clipped_surrogate_obj = clipped_ratio * sarsa_errors
+        loss = -torch.mean(torch.min(surrogate_obj, clipped_surrogate_obj))
+        loss.backward()
+        with torch.no_grad():
+            for name, param in self.actor_model.named_parameters():
+                param.data -= self.actor_learning_rate * param.grad
+                param.grad.zero_()
 
     def init_eligibility(self):
         return {
